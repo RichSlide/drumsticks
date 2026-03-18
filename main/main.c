@@ -557,22 +557,49 @@ void bleprph_host_task(void *param)
 }
 
 #include "esp_task_wdt.h"
+#include "esp_timer.h"
+#include "drum_pipeline.h"
 
 #define IMU_POLL_INTERVAL_MS  10
+
+static dp_state_t dp_state;
 
 static void imu_task(void *param)
 {
     int16_t ax, ay, az, gx, gy, gz;
-    char buf[64];
+    char buf[128];
 
-    // Subscribe this task to the task watchdog so we can reset it ourselves
+    dp_init(&dp_state);
     esp_task_wdt_add(NULL);
 
     while (1) {
         if (imu_read_accel_gyro_raw(&ax, &ay, &az, &gx, &gy, &gz) == ESP_OK) {
-            int len = snprintf(buf, sizeof(buf), "%d,%d,%d,%d,%d,%d",
-                               ax, ay, az, gx, gy, gz);
-            gatt_svr_set_imu_payload_and_notify((uint8_t *)buf, len);
+            int64_t now_us = esp_timer_get_time();
+            dp_hit_event_t hit_evt;
+            bool hit = dp_update(&dp_state, ax, ay, az, gx, gy, gz,
+                                 now_us, &hit_evt);
+
+            if (hit) {
+                /* Send hit event with features:
+                 * H,pitch,roll,pre_pitch,pre_roll,gyro_p,gyro_r,peak_g */
+                int len = snprintf(buf, sizeof(buf),
+                    "H,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.2f,%.3f,%.3f",
+                    hit_evt.pitch, hit_evt.roll,
+                    hit_evt.pre_pitch, hit_evt.pre_roll,
+                    hit_evt.gyro_pitch_rate, hit_evt.gyro_roll_rate,
+                    hit_evt.accel_peak_g,
+                    hit_evt.ax, hit_evt.ay);
+                gatt_svr_set_imu_payload_and_notify((uint8_t *)buf, len);
+            } else {
+                /* Send periodic orientation update:
+                 * S,pitch,roll,accel_mag */
+                const dp_sample_t *latest = &dp_state.ring[
+                    (dp_state.ring_head - 1 + DP_RING_SIZE) % DP_RING_SIZE];
+                int len = snprintf(buf, sizeof(buf),
+                    "S,%.1f,%.1f,%.2f",
+                    dp_state.pitch, dp_state.roll, latest->accel_mag);
+                gatt_svr_set_imu_payload_and_notify((uint8_t *)buf, len);
+            }
         }
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(IMU_POLL_INTERVAL_MS));
