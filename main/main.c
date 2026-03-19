@@ -560,8 +560,6 @@ void bleprph_host_task(void *param)
 #include "esp_timer.h"
 #include "drum_pipeline.h"
 
-#define IMU_POLL_INTERVAL_MS  10
-
 static dp_state_t dp_state;
 
 static void imu_task(void *param)
@@ -580,8 +578,6 @@ static void imu_task(void *param)
                                  now_us, &hit_evt);
 
             if (hit) {
-                /* Send hit event with features:
-                 * H,pitch,roll,pre_pitch,pre_roll,gyro_p,gyro_r,peak_g */
                 int len = snprintf(buf, sizeof(buf),
                     "H,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.2f,%.3f,%.3f",
                     hit_evt.pitch, hit_evt.roll,
@@ -591,8 +587,6 @@ static void imu_task(void *param)
                     hit_evt.ax, hit_evt.ay);
                 gatt_svr_set_imu_payload_and_notify((uint8_t *)buf, len);
             } else {
-                /* Send periodic orientation update:
-                 * S,pitch,roll,accel_mag */
                 const dp_sample_t *latest = &dp_state.ring[
                     (dp_state.ring_head - 1 + DP_RING_SIZE) % DP_RING_SIZE];
                 int len = snprintf(buf, sizeof(buf),
@@ -602,7 +596,7 @@ static void imu_task(void *param)
             }
         }
         esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(IMU_POLL_INTERVAL_MS));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -685,7 +679,7 @@ void app_main(void)
     }
 #endif
 
-    /* Initialize IMU and start polling task */
+    // start IMU
     ret = imu_init();
     if (ret != ESP_OK) {
         ESP_LOGE(tag, "IMU init failed: %s", esp_err_to_name(ret));
