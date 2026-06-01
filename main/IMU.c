@@ -10,7 +10,7 @@ static const char *TAG = "IMU";
 
 // I2C pins
 #define IMU_I2C_SDA_GPIO        4
-#define IMU_I2C_SCL_GPIO        5
+#define IMU_I2C_SCL_GPIO        2
 #define IMU_I2C_FREQ_HZ         400000
 
 // ICM-20948 address (AD0 low = 0x68)
@@ -25,7 +25,35 @@ static const char *TAG = "IMU";
 #define REG_GYRO_CONFIG_1       0x01   // bank 2
 #define REG_ACCEL_CONFIG        0x14   // bank 2
 
-static i2c_master_dev_handle_t imu_dev_handle;
+static i2c_master_bus_handle_t  imu_bus_handle;
+static i2c_master_dev_handle_t  imu_dev_handle;
+
+void imu_i2c_scan(void)
+{
+    if (!imu_bus_handle) {
+        ESP_LOGE(TAG, "I2C bus not initialized");
+        return;
+    }
+
+    ESP_LOGI(TAG, "--- I2C bus scan (SDA=%d SCL=%d) ---", IMU_I2C_SDA_GPIO, IMU_I2C_SCL_GPIO);
+    int found = 0;
+    for (uint8_t addr = 0x03; addr <= 0x77; addr++) {
+        if (i2c_master_probe(imu_bus_handle, addr, 10) == ESP_OK) {
+            ESP_LOGI(TAG, "  found device at 0x%02X", addr);
+            found++;
+        }
+    }
+    if (found == 0) {
+        ESP_LOGW(TAG, "  no devices found — check wiring and pull-ups");
+    } else {
+        ESP_LOGI(TAG, "  %d device(s) found", found);
+        if (i2c_master_probe(imu_bus_handle, 0x68, 10) == ESP_OK)
+            ESP_LOGI(TAG, "  ICM-20948 likely at 0x68 (AD0 low)");
+        else if (i2c_master_probe(imu_bus_handle, 0x69, 10) == ESP_OK)
+            ESP_LOGI(TAG, "  ICM-20948 likely at 0x69 (AD0 high — change ICM20948_ADDR)");
+    }
+    ESP_LOGI(TAG, "--- scan done ---");
+}
 
 static esp_err_t imu_write_reg(uint8_t reg, uint8_t value)
 {
@@ -57,8 +85,7 @@ esp_err_t imu_init(void)
         .flags.enable_internal_pullup = true,
     };
 
-    i2c_master_bus_handle_t bus_handle;
-    err = i2c_new_master_bus(&bus_cfg, &bus_handle);
+    err = i2c_new_master_bus(&bus_cfg, &imu_bus_handle);
     if (err != ESP_OK) return err;
 
     // add IMU device
@@ -68,7 +95,7 @@ esp_err_t imu_init(void)
         .scl_speed_hz = IMU_I2C_FREQ_HZ,
     };
 
-    err = i2c_master_bus_add_device(bus_handle, &dev_cfg, &imu_dev_handle);
+    err = i2c_master_bus_add_device(imu_bus_handle, &dev_cfg, &imu_dev_handle);
     if (err != ESP_OK) return err;
 
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -77,10 +104,15 @@ esp_err_t imu_init(void)
     icm_select_bank(0);
     uint8_t whoami = 0;
     err = imu_read_reg(REG_WHO_AM_I, &whoami, 1);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "WHO_AM_I read failed (%s) — running bus scan", esp_err_to_name(err));
+        imu_i2c_scan();
+        return err;
+    }
 
     if (whoami != 0xEA) {
-        ESP_LOGE(TAG, "ICM-20948 WHO_AM_I mismatch: 0x%02X", whoami);
+        ESP_LOGE(TAG, "ICM-20948 WHO_AM_I mismatch: got 0x%02X, expected 0xEA", whoami);
+        imu_i2c_scan();
         return ESP_FAIL;
     }
 
