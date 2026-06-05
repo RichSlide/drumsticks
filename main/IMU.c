@@ -9,8 +9,8 @@
 static const char *TAG = "IMU";
 
 // I2C pins
-#define IMU_I2C_SDA_GPIO        4
-#define IMU_I2C_SCL_GPIO        2
+#define IMU_I2C_SDA_GPIO        6
+#define IMU_I2C_SCL_GPIO        5
 #define IMU_I2C_FREQ_HZ         400000
 
 // ICM-20948 address (AD0 low = 0x68)
