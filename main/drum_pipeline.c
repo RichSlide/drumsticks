@@ -37,10 +37,10 @@ bool dp_update(dp_state_t *s,
 
     float accel_mag = sqrtf(ax*ax + ay*ay + az*az);
 
-    // first sample - just set initial angles from accel
+    // first sample — pitch from accel; heading starts at 0 (current direction = neutral)
     if (!s->initialized) {
         s->pitch = deg(atan2f(ay, az));
-        s->roll  = deg(atan2f(ax, sqrtf(ay*ay + az*az)));
+        s->roll  = 0.0f;
         s->prev_accel_mag = accel_mag;
         s->last_hit_us    = now_us - (int64_t)DP_HIT_COOLDOWN_MS * 1000;
         s->freeze_until_us = 0;
@@ -57,41 +57,22 @@ bool dp_update(dp_state_t *s,
         }
     }
 
-    // accel-based angles (only good when not moving fast)
-    // roll uses sqrt(ay²+az²) as denominator — stable at steep pitch angles where az alone is tiny
+    // pitch: complementary filter — accel gives absolute reference, gyro integrates between
     float accel_pitch = deg(atan2f(ay, az));
-    float accel_roll  = deg(atan2f(ax, sqrtf(ay*ay + az*az)));
-
-    // adaptive trust: accel_roll is contaminated by any linear acceleration along az
-    // (e.g. moving the arm up/down) even when accel_mag stays near 1g.
-    // Solution: trust gyro exclusively during motion; blend accel only when stationary.
-    float gyro_total = sqrtf(gx*gx + gy*gy + gz*gz);
+    float gyro_total  = sqrtf(gx*gx + gy*gy + gz*gz);
     bool  noisy_accel = fabsf(accel_mag - 1.0f) > DP_ACCEL_TRUST_G;
     bool  moving      = gyro_total > DP_MOVING_GYRO_DPS;
     bool  frozen      = now_us < s->freeze_until_us;
 
-    // when the arm is clearly still, learn the gyro Y-axis bias to cancel long-term drift
+    float alpha = (noisy_accel || frozen) ? 1.0f : DP_ALPHA;
+    s->pitch = alpha * (s->pitch + gx * dt) + (1.0f - alpha) * accel_pitch;
+
+    // heading (stored in roll field): pure gz integration — no accel reference for yaw.
+    // learn gz DC bias when the stick is stationary so long-term drift cancels out.
     if (!moving && !noisy_accel && !frozen) {
-        s->gyro_bias_y = 0.995f * s->gyro_bias_y + 0.005f * gy;
+        s->gyro_bias_z = 0.995f * s->gyro_bias_z + 0.005f * gz;
     }
-
-    float alpha = DP_ALPHA;
-    float alpha_roll;
-    if (noisy_accel || frozen) {
-        alpha      = 1.0f;
-        alpha_roll = 1.0f;     // definitely mid-swing or vibrating
-    } else if (moving) {
-        alpha_roll = DP_ROLL_ALPHA_MOVE;   // arm in motion — gyro only
-    } else {
-        alpha_roll = DP_ROLL_ALPHA_STILL;  // genuinely still — let accel correct drift
-    }
-
-    // complementary filter — subtract learned bias from gy before integrating roll
-    float gyro_pitch = s->pitch + gx * dt;
-    float gyro_roll  = s->roll  + (gy - s->gyro_bias_y) * dt;
-
-    s->pitch = alpha      * gyro_pitch + (1.0f - alpha)      * accel_pitch;
-    s->roll  = alpha_roll * gyro_roll  + (1.0f - alpha_roll) * accel_roll;
+    s->roll = s->roll - (gz - s->gyro_bias_z) * dt;
 
     // store in ring buffer
     dp_sample_t *slot = &s->ring[s->ring_head];
@@ -105,8 +86,12 @@ bool dp_update(dp_state_t *s,
     if (s->ring_count < DP_RING_SIZE) s->ring_count++;
 
     // hit detection: threshold + rising edge + downswing direction + cooldown
-    const dp_sample_t *pre1 = ring_ago(s, 1);
-    bool was_downswing = pre1 && (pre1->gx > DP_DOWNSWING_GX_MIN);
+    // check last 3 samples — immune to FreeRTOS scheduler jitter shifting the window
+    bool was_downswing = false;
+    for (int i = 1; i <= 3 && !was_downswing; i++) {
+        const dp_sample_t *p = ring_ago(s, i);
+        if (p) was_downswing = (p->gx > DP_DOWNSWING_GX_MIN);
+    }
 
     bool hit = false;
     if (accel_mag >= DP_HIT_THRESHOLD_G &&
@@ -126,7 +111,7 @@ bool dp_update(dp_state_t *s,
             hit_out->pitch           = snap_now->pitch;
             hit_out->roll            = snap_now->roll;
             hit_out->gyro_pitch_rate = snap_now->gx;
-            hit_out->gyro_roll_rate  = snap_now->gy;
+            hit_out->gyro_roll_rate  = snap_now->gz;
             hit_out->accel_peak_g    = snap_now->accel_mag;
             // ax/ay from the pre-hit sample — arm at rest position, no inertial contamination
             hit_out->ax = snap_pre ? snap_pre->ax : snap_now->ax;
@@ -148,14 +133,6 @@ bool dp_update(dp_state_t *s,
             hit_out->accel_peak_g = peak;
         }
 
-        // snap: classify using fresh accel-based roll (no gyro drift)
-        float snap_ax = snap_pre ? snap_pre->ax : (snap_now ? snap_now->ax : 0.0f);
-        float snap_ay = snap_pre ? snap_pre->ay : (snap_now ? snap_now->ay : 0.0f);
-        float snap_az = snap_pre ? snap_pre->az : (snap_now ? snap_now->az : 1.0f);
-        float fresh_roll = deg(atan2f(snap_ax, sqrtf(snap_ay*snap_ay + snap_az*snap_az)));
-
-        s->pitch = (s->pitch   < DP_ZONE_PITCH_THRESHOLD) ? DP_ANCHOR_UP_PITCH  : DP_ANCHOR_DOWN_PITCH;
-        s->roll  = (fresh_roll < DP_ZONE_ROLL_THRESHOLD)   ? DP_ANCHOR_LEFT_ROLL : DP_ANCHOR_RIGHT_ROLL;
     }
 
     s->prev_accel_mag = accel_mag;

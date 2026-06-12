@@ -31,6 +31,37 @@
 #include "bleprph.h"
 /* IMU */
 #include "IMU.h"
+/* GPIO */
+#include "driver/gpio.h"
+
+// ── cymbal-mode button ────────────────────────────────────────────────────────
+// One pin is driven HIGH; the other is read with an internal pull-down.
+// Short them together with a button: LOW = drums, HIGH = cymbals.
+#define BTN_DRIVE_GPIO  1  
+
+#define BTN_READ_GPIO   3   
+
+static void button_init(void)
+{
+    gpio_config_t out = {
+        .pin_bit_mask = 1ULL << BTN_DRIVE_GPIO,
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&out);
+    gpio_set_level(BTN_DRIVE_GPIO, 1);
+
+    gpio_config_t in = {
+        .pin_bit_mask = 1ULL << BTN_READ_GPIO,
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&in);
+}
 
 #if CONFIG_EXAMPLE_EXTENDED_ADV
 static uint8_t ext_adv_pattern_1[] = {
@@ -263,6 +294,17 @@ bleprph_gap_event(struct ble_gap_event *event, void *arg)
             rc = ble_gap_conn_find(event->connect.conn_handle, &desc);
             assert(rc == 0);
             bleprph_print_conn_desc(&desc);
+
+            // request minimum connection interval to reduce notification latency
+            struct ble_gap_upd_params conn_params = {
+                .itvl_min            = 6,    // 6 * 1.25ms = 7.5ms
+                .itvl_max            = 12,   // 12 * 1.25ms = 15ms
+                .latency             = 0,
+                .supervision_timeout = 500,  // 500 * 10ms = 5s
+                .min_ce_len          = 0,
+                .max_ce_len          = 0,
+            };
+            ble_gap_update_params(event->connect.conn_handle, &conn_params);
         }
         MODLOG_DFLT(INFO, "\n");
 
@@ -570,9 +612,33 @@ static void imu_task(void *param)
     dp_init(&dp_state);
     esp_task_wdt_add(NULL);
 
+    int     btn_prev       = 0;
+    int64_t btn_press_us   = 0;
+    bool    btn_long_fired = false;
+
     while (1) {
         if (imu_read_accel_gyro_raw(&ax, &ay, &az, &gx, &gy, &gz) == ESP_OK) {
             int64_t now_us = esp_timer_get_time();
+
+            // button: short press (<500 ms) = reset heading; long press = cymbal mode
+            int btn_now = gpio_get_level(BTN_READ_GPIO);
+            if (btn_now && !btn_prev) {
+                btn_press_us   = now_us;
+                btn_long_fired = false;
+            }
+            bool cymbal_mode = false;
+            if (btn_now) {
+                if ((now_us - btn_press_us) >= 500000LL) {
+                    cymbal_mode    = true;
+                    btn_long_fired = true;
+                }
+            } else if (!btn_now && btn_prev) {
+                if (!btn_long_fired) {
+                    dp_state.roll = 0.0f;   // short press: snap heading back to zero
+                }
+            }
+            btn_prev = btn_now;
+
             dp_hit_event_t hit_evt;
             bool hit = dp_update(&dp_state, ax, ay, az, gx, gy, gz,
                                  now_us, &hit_evt);
@@ -590,8 +656,8 @@ static void imu_task(void *param)
                 const dp_sample_t *latest = &dp_state.ring[
                     (dp_state.ring_head - 1 + DP_RING_SIZE) % DP_RING_SIZE];
                 int len = snprintf(buf, sizeof(buf),
-                    "S,%.1f,%.1f,%.2f",
-                    dp_state.pitch, dp_state.roll, latest->accel_mag);
+                    "S,%.1f,%.1f,%.2f,%d",
+                    dp_state.pitch, dp_state.roll, latest->accel_mag, cymbal_mode ? 1 : 0);
                 gatt_svr_set_imu_payload_and_notify((uint8_t *)buf, len);
             }
         }
@@ -678,6 +744,9 @@ void app_main(void)
         cids[i] = 0;
     }
 #endif
+
+    // button: cymbal mode
+    button_init();
 
     // start IMU
     ret = imu_init();

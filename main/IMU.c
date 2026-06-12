@@ -122,9 +122,14 @@ esp_err_t imu_init(void)
     vTaskDelay(pdMS_TO_TICKS(10));
 
     // configure gyro and accel in bank 2
+    // DLPFCFG=7 (bits [5:3]) gives widest bandwidth / lowest delay:
+    //   accel: 473 Hz, 1.0 ms group delay
+    //   gyro:  361 Hz, 0.23 ms group delay
+    // FS_SEL=0 (±250 dps gyro, ±2g accel), FCHOICE=1 (DLPF enabled)
+    // = (7<<3) | (0<<1) | 1 = 0x39
     icm_select_bank(2);
-    imu_write_reg(REG_GYRO_CONFIG_1, 0x01);
-    imu_write_reg(REG_ACCEL_CONFIG, 0x01);
+    imu_write_reg(REG_GYRO_CONFIG_1, 0x39);
+    imu_write_reg(REG_ACCEL_CONFIG, 0x39);
 
     // back to bank 0 for reading data
     icm_select_bank(0);
@@ -137,8 +142,6 @@ esp_err_t imu_read_accel_gyro_raw(int16_t *ax, int16_t *ay, int16_t *az,
                                   int16_t *gx, int16_t *gy, int16_t *gz)
 {
     if (!ax || !ay || !az || !gx || !gy || !gz) return ESP_ERR_INVALID_ARG;
-
-    icm_select_bank(0);
 
     uint8_t buf[12] = {0};
     esp_err_t err = imu_read_reg(REG_ACCEL_XOUT_H, buf, sizeof(buf));

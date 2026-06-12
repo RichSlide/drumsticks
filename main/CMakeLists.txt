@@ -6,4 +6,5 @@ idf_component_register(SRCS "drum_pipeline.c" "IMU.c" "${srcs}"
                        PRIV_REQUIRES nvs_flash
                                      bt
                                      console
-                                     esp_driver_i2c)
+                                     esp_driver_i2c
+                                     esp_driver_gpio)

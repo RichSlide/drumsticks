@@ -11,11 +11,8 @@
 // complementary filter weight for pitch (higher = trust gyro more)
 #define DP_ALPHA            0.95f
 
-// roll trust thresholds — roll uses adaptive alpha instead of a fixed constant
-// when the arm is moving, gyro-only (alpha=1); when still, blend in accel to kill drift
-#define DP_MOVING_GYRO_DPS  15.0f   // total gyro rate above which arm is "moving"
-#define DP_ROLL_ALPHA_MOVE  0.999f  // nearly pure gyro during arm motion
-#define DP_ROLL_ALPHA_STILL 0.75f   // stronger accel correction when genuinely stationary
+// threshold for "arm is moving" — used to gate bias learning
+#define DP_MOVING_GYRO_DPS  8.0f
 
 // dont use accel for angle if magnitude is too far from 1g
 #define DP_ACCEL_TRUST_G    0.3f
@@ -31,22 +28,12 @@
 #define DP_DOWNSWING_GX_MIN  30.0f
 
 // debounce between hits (ms)
-#define DP_HIT_COOLDOWN_MS  300
+#define DP_HIT_COOLDOWN_MS  200
 
-// zone boundaries (must match Python classify_hit thresholds)
-#define DP_ZONE_PITCH_THRESHOLD  -60.0f
-#define DP_ZONE_ROLL_THRESHOLD   -10.0f  // negative bias: right wrist tends to read slightly left
-
-// canonical center of each zone — pitch/roll are snapped here on every hit to kill drift
-// tune these to match where your drums actually sit
-#define DP_ANCHOR_UP_PITCH    -75.0f
-#define DP_ANCHOR_DOWN_PITCH  -40.0f
-#define DP_ANCHOR_LEFT_ROLL   -20.0f
-#define DP_ANCHOR_RIGHT_ROLL   20.0f
 
 // ring buffer for storing recent samples
 #define DP_RING_SIZE        16
-#define DP_PRE_HIT_SAMPLES  3
+#define DP_PRE_HIT_SAMPLES  6
 
 // one IMU sample with orientation
 typedef struct {
@@ -71,7 +58,7 @@ typedef struct {
 typedef struct {
     float    pitch, roll;
     float    prev_accel_mag;
-    float    gyro_bias_y;    // slow-learned gy bias, subtracted before roll integration
+    float    gyro_bias_z;    // slow-learned gz bias, subtracted before heading integration
     int64_t  last_hit_us;
     int64_t  freeze_until_us;
     bool     initialized;
